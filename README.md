@@ -13,8 +13,9 @@ teammates on in Slack whenever their push-up count goes up. 💪
    get a halved target automatically.
 4. Compares against the last snapshot in `state.json`.
 5. Posts to Slack for:
-   - **Any increase** — an encouraging shout-out, e.g.
-     > 🔥 *Dave Kempe* just knocked out 25 push-ups! On fire! (total: 45 / 3,307 — 1%)
+   - **Any increase** — an encouraging shout-out showing progress toward today's
+     target, e.g.
+     > 🔥 *Dave Kempe* just knocked out 25 push-ups! On fire! (*45/100* toward today's target · 45 total)
    - **Hitting today's target** — a one-time celebration per person per day, e.g.
      > 🎊💯 *Dan Gauci* just smashed today's target of 100 push-ups — 100 done today! 🙌
    - **Reaching their overall goal** — an extra 🎉.

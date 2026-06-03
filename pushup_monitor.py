@@ -142,23 +142,27 @@ CHEERS = [
 GOAL_CHEERS = ["🎉🎯", "🏅🎉", "🥳🏆", "🎊💯"]
 
 
-def build_message(member: dict, prev: int, now: int) -> str:
+def build_message(member: dict, prev: int, now: int,
+                  reps_today: int | None = None, mdt: int | None = None) -> str:
     name = nice_name(member)
     gained = now - prev
-    target = int(float(member.get("m_target_steps") or 0))
+    goal = int(float(member.get("m_target_steps") or 0))
     rep_word = "push-up" if gained == 1 else "push-ups"
     emoji, cheer = random.choice(CHEERS)
 
-    msg = f"{emoji} *{name}* just knocked out {gained} {rep_word}! {cheer} (total: {now:,}"
-    if target:
-        pct = round(now / target * 100)
-        msg += f" / {target:,} — {pct}%"
-    msg += ")"
+    msg = f"{emoji} *{name}* just knocked out {gained} {rep_word}! {cheer} "
+    if mdt:
+        # Today's target is the headline context during the challenge.
+        msg += f"(*{reps_today:,}/{mdt:,}* toward today's target · {now:,} total)"
+    elif goal:
+        msg += f"(total: {now:,} / {goal:,} — {round(now / goal * 100)}%)"
+    else:
+        msg += f"(total: {now:,})"
 
-    # Celebrate hitting the goal this round.
-    if target and prev < target <= now:
+    # Celebrate hitting the overall goal this round.
+    if goal and prev < goal <= now:
         party = random.choice(GOAL_CHEERS)
-        msg += f"\n{party} *{name}* just reached their goal of {target:,} push-ups! Legend! 🙌"
+        msg += f"\n{party} *{name}* just reached their overall goal of {goal:,} push-ups! Legend! 🙌"
     return msg
 
 
@@ -262,14 +266,14 @@ def main() -> int:
         now = pushups(member)
         new_counts[mid] = now
         prev = counts.get(mid)
-
-        # 1) Any increase → an encouraging shout-out.
-        if not first_run and prev is not None and now > prev:
-            messages.append(build_message(member, prev, now))
-
-        # 2) Crossing today's daily target → a one-time celebration.
         mdt = daily_target_for(member, target)
         reps_today = now - baseline.get(mid, now)
+
+        # 1) Any increase → an encouraging shout-out (with today's-target context).
+        if not first_run and prev is not None and now > prev:
+            messages.append(build_message(member, prev, now, reps_today, mdt))
+
+        # 2) Crossing today's daily target → a one-time celebration.
         if not first_run and mdt and mid not in target_hit and reps_today >= mdt:
             half = int(float(member.get("m_target_steps") or 0)) == HALF_TARGET_STEPS
             messages.append(build_target_message(member, reps_today, mdt, half))
