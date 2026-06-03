@@ -1,6 +1,9 @@
 .env
 state.json
 state-*.json
-page.html
+# scraped pages / debug artifacts — never commit
+*.html
+*.out
+*.xml
 monitor.log
 __pycache__/

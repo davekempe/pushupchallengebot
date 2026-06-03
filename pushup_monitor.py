@@ -24,7 +24,7 @@ from datetime import date
 from pathlib import Path
 
 BASE_URL = "https://www.thepushupchallenge.com.au"
-FACTS_URL = f"{BASE_URL}/challenge/daily-facts"
+FACTS_URL = f"{BASE_URL}/daily-facts"
 DEFAULT_TEAM = "PacketPushupers"  # used if PUSHUP_TEAM is unset
 HERE = Path(__file__).resolve().parent
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 PushupMonitor/1.0"
@@ -33,6 +33,11 @@ USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 PushupMonitor/1
 MEMBERS_RE = re.compile(r"var teamMembers = '(.*?)';", re.S)
 # Page <title> is "The Push-Up Challenge - <Team Name>".
 TITLE_RE = re.compile(r"<title>\s*(.*?)\s*</title>", re.I | re.S)
+# The daily-facts page reveals one block per day, each starting with the date
+# ("Day 2 - Thursday 4th June") and containing "...push-up target is <N>...".
+TARGET_NUM_RE = re.compile(r"push-up target is\s*(\d[\d,]*)", re.I)
+# The explanatory clause varies day to day: "because ..." or "for the 72% ...".
+FACT_RE = re.compile(r"\b(because|for the\b|for those\b|for\b)[^<.]{5,200}", re.I)
 # The daily-facts page renders TODAY's target inline, e.g.
 #   "today's push-up target is 100 - because as little as 10 minutes..."
 TARGET_RE = re.compile(r"push-up target is\s*(\d[\d,]*)\s*(?:-|&ndash;)?\s*(because[^<]{5,220})?", re.I)
@@ -88,23 +93,50 @@ def parse_members(html: str) -> list[dict]:
     return json.loads(raw)
 
 
-def fetch_daily_target() -> tuple[int | None, str | None]:
-    """Scrape today's push-up target (and its mental-health fact) from the
-    date-aware daily-facts page. Returns (None, None) on a rest day or any
-    failure — callers must treat the target as optional."""
+def date_label(d: date) -> str:
+    """Format a date the way the page labels its day blocks, e.g.
+    'Thursday 4th June'."""
+    n = d.day
+    suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{d.strftime('%A')} {n}{suffix} {d.strftime('%B')}"
+
+
+def fetch_daily_target(today: date) -> tuple[str, int | None, str | None]:
+    """Scrape *today's* push-up target + fact from the daily-facts page.
+
+    The page reveals one block per challenge day (in date order) and reuses the
+    same "push-up target is N" wording in each, so we anchor on today's date
+    label and read the target from that block. Returns a (status, target, fact)
+    tuple where status is:
+      "ok"      — target found (target/fact populated)
+      "rest"    — today's block is a rest day
+      "unknown" — page unavailable, or today's block not published yet
+    Distinguishing "unknown" from "rest" avoids falsely announcing a rest day
+    when the scrape simply failed."""
     try:
         req = urllib.request.Request(FACTS_URL, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=30) as resp:
             html = resp.read().decode("utf-8", errors="replace")
-        html = html.replace("&ndash;", "-").replace("&rsquo;", "'").replace("&nbsp;", " ")
-        m = TARGET_RE.search(html)
-        if not m:
-            return None, None
-        target = int(m.group(1).replace(",", ""))
-        fact = (m.group(2) or "").strip().rstrip(".") or None
-        return target, fact
     except Exception:
-        return None, None
+        return "unknown", None, None
+
+    html = (html.replace("&ndash;", "-").replace("&rsquo;", "'")
+                .replace("&nbsp;", " ").replace("&amp;", "&"))
+    idx = html.find(date_label(today))
+    if idx == -1:
+        return "unknown", None, None  # today's block not published — don't guess
+
+    block = html[idx:idx + 4000]  # today is the last block, so this is its content
+    if re.search(r"rest day|\bREST\b", block, re.I) and not TARGET_NUM_RE.search(block):
+        return "rest", None, None
+
+    m = TARGET_NUM_RE.search(block)
+    if not m:
+        return "unknown", None, None
+    target = int(m.group(1).replace(",", ""))
+    fm = FACT_RE.search(block, m.end())
+    fact = fm.group(0).strip().rstrip(",").rstrip(".") if fm else None
+    return "ok", target, fact
 
 
 def daily_target_for(member: dict, base_target: int | None) -> int:
@@ -178,8 +210,11 @@ def build_message(member: dict, prev: int, now: int,
 
     msg = f"{emoji} *{name}* just knocked out {gained} {rep_word}! {cheer} "
     if mdt:
-        # Today's target is the headline context during the challenge.
-        msg += f"(*{reps_today:,}/{mdt:,}* toward today's target · {now:,} total)"
+        # Daily target is the headline; lifetime total/percent trails it.
+        msg += f"(*{reps_today:,}/{mdt:,}* toward today's target · {now:,} total"
+        if goal:
+            msg += f", {round(now / goal * 100)}% of {goal:,}"
+        msg += ")"
     elif goal:
         msg += f"(total: {now:,} / {goal:,} — {round(now / goal * 100)}%)"
     else:
@@ -207,8 +242,8 @@ def migrate_state(state: dict) -> dict:
     return {"day": None, "counts": counts, "day_baseline": {}, "target_hit": []}
 
 
-def build_summary(members: list[dict], baseline: dict, target: int | None,
-                  fact: str | None, team_name: str) -> str:
+def build_summary(members: list[dict], baseline: dict, status: str,
+                  target: int | None, fact: str | None, team_name: str) -> str:
     """Daily team scoreboard: lifetime totals, today's target, and progress
     against it."""
     ranked = sorted(members, key=pushups, reverse=True)
@@ -224,14 +259,15 @@ def build_summary(members: list[dict], baseline: dict, target: int | None,
     if target:
         lines.append(f"🎯 Today's target: *{target:,}* push-ups each.")
         if fact:
-            lines.append(f"_{fact.capitalize()}._")
+            lines.append(f"_{fact[0].upper() + fact[1:]}._")
         team_today = sum(reps_today(m) for m in members)
         team_goal = sum(daily_target_for(m, target) for m in members)
         pct = round(team_today / team_goal * 100) if team_goal else 0
         bar = "🟩" * (pct // 10) + "⬜" * (10 - min(10, pct // 10))
         lines.append(f"Team did *{team_today:,}* of {team_goal:,} today — {pct}% {bar}")
-    else:
+    elif status == "rest":
         lines.append("😌 Rest day — no target today. Recover those arms!")
+    # status == "unknown": skip the target section rather than guess a rest day.
     lines.append("")
 
     medals = ["🥇", "🥈", "🥉"]
@@ -285,7 +321,7 @@ def main() -> int:
     html = fetch_page(cfg["team_url"])
     members = parse_members(html)
     team_name = cfg["team_name"] or parse_team_name(html, cfg["slug"])
-    target, fact = fetch_daily_target()
+    status, target, fact = fetch_daily_target(date.fromisoformat(today))
 
     state = migrate_state(load_state(cfg["state_file"]))
     counts = state.get("counts", {})
@@ -300,7 +336,7 @@ def main() -> int:
     target_hit = state["target_hit"]
 
     if summary_mode:
-        msg = build_summary(members, baseline, target, fact, team_name)
+        msg = build_summary(members, baseline, status, target, fact, team_name)
         print(msg)
         if not dry_run:
             post_to_slack(webhook, msg)

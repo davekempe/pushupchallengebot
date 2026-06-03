@@ -12,9 +12,11 @@ other teams can run their own copy.
 2. Parses each member's push-up count from the page's embedded `teamMembers`
    data (`total_steps` field — no API key needed). The team name is read from
    the page title.
-3. Scrapes **today's daily target** + mental-health fact from the date-aware
-   `/challenge/daily-facts` page (e.g. 3 Jun 2026 = 100). Half-challenge members
-   get a halved target automatically.
+3. Scrapes **today's daily target** + mental-health fact from the `/daily-facts`
+   page. That page reveals one block per day (reusing the same "push-up target
+   is N" wording), so we anchor on today's date label (e.g. "Thursday 4th June")
+   and read the target from that block — and tell a real rest day apart from a
+   failed scrape. Half-challenge members get a halved target automatically.
 4. Compares against the last snapshot in `state-<team>.json`.
 5. Posts to Slack for:
    - **Any increase** — an encouraging shout-out showing progress toward today's
@@ -67,6 +69,7 @@ PUSHUP_TEAM=SomeOtherTeam PUSHUP_SLACK_WEBHOOK=https://... python3 pushup_monito
 
 ```
 0 * * * *  /path/to/pushupchallenge/run.sh             # hourly increase + target alerts
+15 9 * * * /path/to/pushupchallenge/run.sh --summary   # morning kick-off (when the app nudges)
 0 12 * * * /path/to/pushupchallenge/run.sh --summary   # midday catch-up checkpoint
 0 18 * * * /path/to/pushupchallenge/run.sh --summary   # end-of-day recap
 ```
