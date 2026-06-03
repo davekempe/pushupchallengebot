@@ -1,5 +1,6 @@
 .env
 state.json
+state-*.json
 page.html
 monitor.log
 __pycache__/

@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Hourly monitor for the Packet Push(up)ers fundraising team.
+"""Hourly monitor for a Push-Up Challenge fundraising team.
 
 Fetches the Funraisin team page, parses each member's pushup count
 (embedded in the page as a `var teamMembers = '...'` JS variable), compares
 against the last saved snapshot, and posts an encouraging message to Slack
 whenever someone's count has gone up.
+
+The team and Slack webhook are configured via environment / .env:
+    PUSHUP_TEAM           team slug or full fundraiser URL (e.g. PacketPushupers)
+    PUSHUP_SLACK_WEBHOOK  Slack incoming-webhook URL
+    PUSHUP_TEAM_NAME      optional display-name override (else read from the page)
 
 Pure standard library — no pip installs, so it runs anywhere Python 3 does.
 """
@@ -18,14 +23,16 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
-TEAM_URL = "https://www.thepushupchallenge.com.au/fundraisers/PacketPushupers"
-FACTS_URL = "https://www.thepushupchallenge.com.au/challenge/daily-facts"
+BASE_URL = "https://www.thepushupchallenge.com.au"
+FACTS_URL = f"{BASE_URL}/challenge/daily-facts"
+DEFAULT_TEAM = "PacketPushupers"  # used if PUSHUP_TEAM is unset
 HERE = Path(__file__).resolve().parent
-STATE_FILE = HERE / "state.json"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 PushupMonitor/1.0"
 
 # Matches: var teamMembers = '[...]';
 MEMBERS_RE = re.compile(r"var teamMembers = '(.*?)';", re.S)
+# Page <title> is "The Push-Up Challenge - <Team Name>".
+TITLE_RE = re.compile(r"<title>\s*(.*?)\s*</title>", re.I | re.S)
 # The daily-facts page renders TODAY's target inline, e.g.
 #   "today's push-up target is 100 - because as little as 10 minutes..."
 TARGET_RE = re.compile(r"push-up target is\s*(\d[\d,]*)\s*(?:-|&ndash;)?\s*(because[^<]{5,220})?", re.I)
@@ -33,25 +40,44 @@ TARGET_RE = re.compile(r"push-up target is\s*(\d[\d,]*)\s*(?:-|&ndash;)?\s*(beca
 HALF_TARGET_STEPS = 1654
 
 
-def load_webhook() -> str:
-    """Slack webhook from env, falling back to a local .env file."""
-    url = os.environ.get("PUSHUP_SLACK_WEBHOOK", "").strip()
-    if url:
-        return url
+def load_config() -> dict:
+    """Read PUSHUP_* settings from the process env, falling back to a local
+    .env file (process env wins). Lets each team run their own copy by just
+    setting PUSHUP_TEAM and PUSHUP_SLACK_WEBHOOK."""
+    cfg = {}
     env_file = HERE / ".env"
     if env_file.exists():
         for line in env_file.read_text().splitlines():
             line = line.strip()
-            if line.startswith("PUSHUP_SLACK_WEBHOOK"):
-                _, _, val = line.partition("=")
-                return val.strip().strip('"').strip("'")
-    raise SystemExit("No Slack webhook found. Set PUSHUP_SLACK_WEBHOOK or add it to .env")
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            cfg[key.strip()] = val.strip().strip('"').strip("'")
+    cfg.update({k: v for k, v in os.environ.items() if k.startswith("PUSHUP_")})
+
+    # Accept either a bare slug or a full fundraiser URL for PUSHUP_TEAM.
+    slug = (cfg.get("PUSHUP_TEAM") or DEFAULT_TEAM).strip().rstrip("/").split("/")[-1]
+    return {
+        "slug": slug,
+        "team_url": f"{BASE_URL}/fundraisers/{slug}",
+        "team_name": (cfg.get("PUSHUP_TEAM_NAME") or "").strip() or None,
+        "webhook": (cfg.get("PUSHUP_SLACK_WEBHOOK") or "").strip() or None,
+        "state_file": HERE / f"state-{slug}.json",
+    }
 
 
-def fetch_page() -> str:
-    req = urllib.request.Request(TEAM_URL, headers={"User-Agent": USER_AGENT})
+def fetch_page(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
+
+
+def parse_team_name(html: str, fallback: str) -> str:
+    """Pull the team's display name from the page <title>."""
+    m = TITLE_RE.search(html)
+    if m and " - " in m.group(1):
+        return m.group(1).split(" - ", 1)[1].strip()
+    return fallback
 
 
 def parse_members(html: str) -> list[dict]:
@@ -103,17 +129,17 @@ def nice_name(member: dict) -> str:
     return (member.get("name") or member.get("m_username") or "Someone").strip().title()
 
 
-def load_state() -> dict:
-    if STATE_FILE.exists():
+def load_state(path: Path) -> dict:
+    if path.exists():
         try:
-            return json.loads(STATE_FILE.read_text())
+            return json.loads(path.read_text())
         except json.JSONDecodeError:
             pass
     return {}
 
 
-def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+def save_state(path: Path, state: dict) -> None:
+    path.write_text(json.dumps(state, indent=2))
 
 
 def post_to_slack(webhook: str, text: str) -> None:
@@ -182,7 +208,7 @@ def migrate_state(state: dict) -> dict:
 
 
 def build_summary(members: list[dict], baseline: dict, target: int | None,
-                  fact: str | None) -> str:
+                  fact: str | None, team_name: str) -> str:
     """Daily team scoreboard: lifetime totals, today's target, and progress
     against it."""
     ranked = sorted(members, key=pushups, reverse=True)
@@ -192,7 +218,7 @@ def build_summary(members: list[dict], baseline: dict, target: int | None,
     def reps_today(m):
         return max(0, pushups(m) - baseline.get(str(m.get("member_id")), pushups(m)))
 
-    lines = ["📊 *Daily Push-Up Update — Packet Push(up)ers!* 💪",
+    lines = [f"📊 *Daily Push-Up Update — {team_name}!* 💪",
              f"Team total so far: *{total:,}* push-ups across {len(members)} members! 🔥"]
 
     if target:
@@ -249,13 +275,19 @@ def build_summary(members: list[dict], baseline: dict, target: int | None,
 def main() -> int:
     dry_run = "--dry-run" in sys.argv
     summary_mode = "--summary" in sys.argv
-    webhook = None if dry_run else load_webhook()
+
+    cfg = load_config()
+    webhook = cfg["webhook"]
+    if not dry_run and not webhook:
+        raise SystemExit("No Slack webhook found. Set PUSHUP_SLACK_WEBHOOK or add it to .env")
 
     today = date.today().isoformat()
-    members = parse_members(fetch_page())
+    html = fetch_page(cfg["team_url"])
+    members = parse_members(html)
+    team_name = cfg["team_name"] or parse_team_name(html, cfg["slug"])
     target, fact = fetch_daily_target()
 
-    state = migrate_state(load_state())
+    state = migrate_state(load_state(cfg["state_file"]))
     counts = state.get("counts", {})
     first_run = not counts
 
@@ -268,11 +300,11 @@ def main() -> int:
     target_hit = state["target_hit"]
 
     if summary_mode:
-        msg = build_summary(members, baseline, target, fact)
+        msg = build_summary(members, baseline, target, fact, team_name)
         print(msg)
         if not dry_run:
             post_to_slack(webhook, msg)
-            save_state(state)  # persist any rollover that happened
+            save_state(cfg["state_file"], state)  # persist any rollover that happened
         return 0
 
     new_counts = {}
@@ -310,7 +342,7 @@ def main() -> int:
 
     state["counts"] = new_counts
     if not dry_run:
-        save_state(state)
+        save_state(cfg["state_file"], state)
     return 0
 
 
