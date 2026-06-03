@@ -216,17 +216,33 @@ def build_summary(members: list[dict], baseline: dict, target: int | None,
             goal = int(float(m.get("m_target_steps") or 0))
             count = pushups(m)
             today = reps_today(m)
+            mdt = daily_target_for(m, target)
             line = f"{badge} {nice_name(m)} — {count:,}"
             if goal:
                 line += f" ({round(count / goal * 100)}% of {goal:,})"
-            if today:
-                hit = " ✅" if target and today >= daily_target_for(m, target) else ""
-                line += f"  ·  +{today:,} today{hit}"
+            if mdt and today >= mdt:
+                line += f"  ·  +{today:,} today ✅"
+            elif mdt:
+                line += f"  ·  +{today:,} today (*{mdt - today:,} to go*)"
+            elif today:
+                line += f"  ·  +{today:,} today"
             lines.append(line)
     else:
         lines.append("No push-ups logged yet — who's going to get us on the board first? 🏁")
     lines.append("")
-    lines.append("Keep pushing, team! Every rep counts for a great cause. 🙌💙")
+
+    # Closing line nudges the team to catch up when behind today's target.
+    if target:
+        team_done = sum(reps_today(m) for m in members)
+        team_goal = sum(daily_target_for(m, target) for m in members)
+        if team_done >= team_goal:
+            lines.append("🎉 Team's smashed today's target — anything more is bonus. Awesome work! 🙌💙")
+        else:
+            to_go = team_goal - team_done
+            lines.append(f"⏰ *{to_go:,} to go* to hit today's team target — drop and give us "
+                         f"some, there's still time to catch up! 💪🔥")
+    else:
+        lines.append("Keep pushing, team! Every rep counts for a great cause. 🙌💙")
     return "\n".join(lines)
 
 

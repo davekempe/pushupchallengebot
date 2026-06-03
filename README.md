@@ -48,10 +48,14 @@ python3 pushup_monitor.py --summary --dry-run
 ## Hourly schedule (cron)
 
 ```
-0 * * * * /home/dave/src/pushupchallenge/run.sh
+0 * * * * /home/dave/src/pushupchallenge/run.sh             # hourly increase + target alerts
+0 12 * * * /home/dave/src/pushupchallenge/run.sh --summary   # midday catch-up checkpoint
+0 18 * * * /home/dave/src/pushupchallenge/run.sh --summary   # end-of-day recap
 ```
 
-Output is appended to `monitor.log`. State lives in `state.json` — delete it to
+The summary shows each person's "to go" until they hit the day's target and,
+when the team is behind, how many push-ups are left to catch up — so the noon
+post nudges people to get moving. Output is appended to `monitor.log`. State lives in `state.json` — delete it to
 re-seed a fresh baseline.
 
 ## Files
