@@ -38,6 +38,13 @@ TITLE_RE = re.compile(r"<title>\s*(.*?)\s*</title>", re.I | re.S)
 TARGET_NUM_RE = re.compile(r"push-up target is\s*(\d[\d,]*)", re.I)
 # The explanatory clause varies day to day: "because ..." or "for the 72% ...".
 FACT_RE = re.compile(r"\b(because|for the\b|for those\b|for\b)[^<.]{5,200}", re.I)
+# "Day 3 - Friday 5th June" → captures the day number and month name.
+DAY_BLOCK_RE = re.compile(r"Day\s+\d{1,2}\s*-\s*[A-Za-z]+day\s+(\d{1,2})\w*\s+([A-Za-z]+)", re.I)
+MONTHS = {m: i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July", "August",
+     "September", "October", "November", "December"], 1)}
+# Cached per-date target schedule, shared across teams (challenge-wide data).
+SCHEDULE_FILE = HERE / "daily_targets.json"
 # The daily-facts page renders TODAY's target inline, e.g.
 #   "today's push-up target is 100 - because as little as 10 minutes..."
 TARGET_RE = re.compile(r"push-up target is\s*(\d[\d,]*)\s*(?:-|&ndash;)?\s*(because[^<]{5,220})?", re.I)
@@ -101,42 +108,91 @@ def date_label(d: date) -> str:
     return f"{d.strftime('%A')} {n}{suffix} {d.strftime('%B')}"
 
 
-def fetch_daily_target(today: date) -> tuple[str, int | None, str | None]:
-    """Scrape *today's* push-up target + fact from the daily-facts page.
+def load_schedule() -> dict:
+    """The known per-date targets: {"2026-06-03": {"target": 100, "fact": "..."}}."""
+    if SCHEDULE_FILE.exists():
+        try:
+            return json.loads(SCHEDULE_FILE.read_text())
+        except json.JSONDecodeError:
+            pass
+    return {}
 
-    The page reveals one block per challenge day (in date order) and reuses the
-    same "push-up target is N" wording in each, so we anchor on today's date
-    label and read the target from that block. Returns a (status, target, fact)
-    tuple where status is:
-      "ok"      — target found (target/fact populated)
-      "rest"    — today's block is a rest day
-      "unknown" — page unavailable, or today's block not published yet
-    Distinguishing "unknown" from "rest" avoids falsely announcing a rest day
-    when the scrape simply failed."""
+
+def save_schedule(schedule: dict) -> None:
+    SCHEDULE_FILE.write_text(json.dumps(schedule, indent=2, sort_keys=True))
+
+
+def extract_targets_from_page(html: str, year: int) -> dict:
+    """Pull {date_iso: {"target", "fact"}} for every day block that has its
+    target rendered as text. Past/revealed days are reliable; the *current*
+    day is usually just an image, so it won't appear until it's past — which
+    is why we cache what we can scrape."""
+    html = (html.replace("&ndash;", "-").replace("&rsquo;", "'")
+                .replace("&nbsp;", " ").replace("&amp;", "&"))
+    labels = [(m.start(), int(m.group(1)), m.group(2))
+              for m in DAY_BLOCK_RE.finditer(html)]
+    found = {}
+    for m in TARGET_NUM_RE.finditer(html):
+        preceding = [lbl for lbl in labels if lbl[0] < m.start()]
+        if not preceding:
+            continue
+        _, day_num, month_name = preceding[-1]
+        month = MONTHS.get(month_name.capitalize())
+        if not month:
+            continue
+        try:
+            iso = date(year, month, day_num).isoformat()
+        except ValueError:
+            continue
+        fm = FACT_RE.search(html, m.end())
+        fact = (fm.group(0).strip().rstrip(",").rstrip(".")
+                if fm and fm.start() - m.end() < 260 else None)
+        found[iso] = {"target": int(m.group(1).replace(",", "")), "fact": fact}
+    return found
+
+
+def fetch_daily_target(today: date) -> tuple[str, int | None, str | None]:
+    """Resolve today's push-up target, returning (status, target, fact) where
+    status is "ok" / "rest" / "unknown".
+
+    Source of truth is the cached schedule (daily_targets.json), which can be
+    pre-filled manually from the app. On each call we also scrape the live page
+    and merge any newly-revealed (past-day) targets into the cache, so it
+    self-heals over time. The current day is typically published only as an
+    image, so if it isn't in the schedule we return "unknown" rather than
+    guessing — and only call it a "rest" day when the page block says so."""
+    schedule = load_schedule()
+    html = None
     try:
         req = urllib.request.Request(FACTS_URL, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=30) as resp:
             html = resp.read().decode("utf-8", errors="replace")
     except Exception:
-        return "unknown", None, None
+        html = None
 
-    html = (html.replace("&ndash;", "-").replace("&rsquo;", "'")
-                .replace("&nbsp;", " ").replace("&amp;", "&"))
-    idx = html.find(date_label(today))
-    if idx == -1:
-        return "unknown", None, None  # today's block not published — don't guess
+    if html:
+        discovered = extract_targets_from_page(html, today.year)
+        changed = False
+        for iso, entry in discovered.items():
+            if entry["target"] and schedule.get(iso, {}).get("target") != entry["target"]:
+                schedule[iso] = entry
+                changed = True
+        if changed:
+            save_schedule(schedule)
 
-    block = html[idx:idx + 4000]  # today is the last block, so this is its content
-    if re.search(r"rest day|\bREST\b", block, re.I) and not TARGET_NUM_RE.search(block):
-        return "rest", None, None
+    entry = schedule.get(today.isoformat())
+    if entry and entry.get("target"):
+        return "ok", entry["target"], entry.get("fact")
 
-    m = TARGET_NUM_RE.search(block)
-    if not m:
-        return "unknown", None, None
-    target = int(m.group(1).replace(",", ""))
-    fm = FACT_RE.search(block, m.end())
-    fact = fm.group(0).strip().rstrip(",").rstrip(".") if fm else None
-    return "ok", target, fact
+    # Not in the schedule — only claim a rest day if the page explicitly says so.
+    if html:
+        clean = html.replace("&nbsp;", " ")
+        idx = clean.find(date_label(today))
+        if idx != -1:
+            block = clean[idx:idx + 4000]
+            if re.search(r"rest day|\bREST\b", block, re.I) and not TARGET_NUM_RE.search(block):
+                return "rest", None, None
+    return "unknown", None, None
 
 
 def daily_target_for(member: dict, base_target: int | None) -> int:
@@ -309,9 +365,28 @@ def build_summary(members: list[dict], baseline: dict, status: str,
     return "\n".join(lines)
 
 
+def set_target_cli() -> int:
+    """`--set-target N [--date YYYY-MM-DD]` — manually record a day's target
+    (e.g. read off the app) into the shared schedule. Defaults to today."""
+    args = sys.argv
+    value = int(args[args.index("--set-target") + 1])
+    iso = (args[args.index("--date") + 1] if "--date" in args
+           else date.today().isoformat())
+    date.fromisoformat(iso)  # validate
+    schedule = load_schedule()
+    fact = schedule.get(iso, {}).get("fact")
+    schedule[iso] = {"target": value, "fact": fact}
+    save_schedule(schedule)
+    print(f"Set target for {iso}: {value} push-ups")
+    return 0
+
+
 def main() -> int:
     dry_run = "--dry-run" in sys.argv
     summary_mode = "--summary" in sys.argv
+
+    if "--set-target" in sys.argv:
+        return set_target_cli()
 
     cfg = load_config()
     webhook = cfg["webhook"]

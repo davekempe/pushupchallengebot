@@ -12,11 +12,12 @@ other teams can run their own copy.
 2. Parses each member's push-up count from the page's embedded `teamMembers`
    data (`total_steps` field — no API key needed). The team name is read from
    the page title.
-3. Scrapes **today's daily target** + mental-health fact from the `/daily-facts`
-   page. That page reveals one block per day (reusing the same "push-up target
-   is N" wording), so we anchor on today's date label (e.g. "Thursday 4th June")
-   and read the target from that block — and tell a real rest day apart from a
-   failed scrape. Half-challenge members get a halved target automatically.
+3. Resolves **today's daily target** from a cached schedule (`daily_targets.json`).
+   The site publishes the current day's target only as an image and reveals it as
+   *text* once the day is past, so the bot scrapes the `/daily-facts` page each
+   run and auto-fills the schedule from those revealed (past) days — it learns
+   each target with no input. For the current day before it's revealed, set it
+   manually (see below). Half-challenge members get a halved target automatically.
 4. Compares against the last snapshot in `state-<team>.json`.
 5. Posts to Slack for:
    - **Any increase** — an encouraging shout-out showing progress toward today's
@@ -58,6 +59,21 @@ python3 pushup_monitor.py --summary      # leaderboard + today's target
 python3 pushup_monitor.py --dry-run      # prints messages, posts nothing, leaves state untouched
 python3 pushup_monitor.py --summary --dry-run
 ```
+
+### Setting today's target manually
+
+The bot auto-learns each day's target once the website reveals it (by the next
+day at the latest). To show *today's* target before then, read it off the app
+(the daily reminder) or the daily fact image and record it:
+
+```bash
+python3 pushup_monitor.py --set-target 120                 # today
+python3 pushup_monitor.py --set-target 80 --date 2026-06-07 # a specific day
+```
+
+Targets live in `daily_targets.json` (you can also pre-fill the whole schedule
+there by hand). A manual entry is auto-corrected if the site later reveals a
+different official number.
 
 You can also point it at a team for one run without editing `.env`:
 
