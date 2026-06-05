@@ -44,7 +44,19 @@ MONTHS = {m: i for i, m in enumerate(
     ["January", "February", "March", "April", "May", "June", "July", "August",
      "September", "October", "November", "December"], 1)}
 # Cached per-date target schedule, shared across teams (challenge-wide data).
+# Used for the mental-health fact text and as a fallback for unknown dates.
 SCHEDULE_FILE = HERE / "daily_targets.json"
+
+# Official 2026 schedule (Day 1 = 3 Jun), transcribed from the app's Progress
+# screen. 0 == rest day. Verified: the non-rest targets sum to 3,307.
+DAILY_TARGETS_2026 = {
+    "2026-06-03": 100, "2026-06-04": 72,  "2026-06-05": 120, "2026-06-06": 150,
+    "2026-06-07": 0,   "2026-06-08": 140, "2026-06-09": 170, "2026-06-10": 130,
+    "2026-06-11": 160, "2026-06-12": 167, "2026-06-13": 191, "2026-06-14": 0,
+    "2026-06-15": 120, "2026-06-16": 220, "2026-06-17": 160, "2026-06-18": 190,
+    "2026-06-19": 170, "2026-06-20": 208, "2026-06-21": 0,   "2026-06-22": 120,
+    "2026-06-23": 180, "2026-06-24": 229, "2026-06-25": 160, "2026-06-26": 150,
+}
 # The daily-facts page renders TODAY's target inline, e.g.
 #   "today's push-up target is 100 - because as little as 10 minutes..."
 TARGET_RE = re.compile(r"push-up target is\s*(\d[\d,]*)\s*(?:-|&ndash;)?\s*(because[^<]{5,220})?", re.I)
@@ -155,13 +167,14 @@ def fetch_daily_target(today: date) -> tuple[str, int | None, str | None]:
     """Resolve today's push-up target, returning (status, target, fact) where
     status is "ok" / "rest" / "unknown".
 
-    Source of truth is the cached schedule (daily_targets.json), which can be
-    pre-filled manually from the app. On each call we also scrape the live page
-    and merge any newly-revealed (past-day) targets into the cache, so it
-    self-heals over time. The current day is typically published only as an
-    image, so if it isn't in the schedule we return "unknown" rather than
-    guessing — and only call it a "rest" day when the page block says so."""
+    Targets come from the hardcoded official 2026 schedule (DAILY_TARGETS_2026).
+    We still scrape the daily-facts page to harvest the mental-health *fact*
+    text into the cache (it's nice in the summary) and as a fallback for dates
+    outside the hardcoded table."""
+    iso = today.isoformat()
     schedule = load_schedule()
+
+    # Best-effort scrape — only to enrich the fact cache; never required.
     html = None
     try:
         req = urllib.request.Request(FACTS_URL, headers={"User-Agent": USER_AGENT})
@@ -169,29 +182,26 @@ def fetch_daily_target(today: date) -> tuple[str, int | None, str | None]:
             html = resp.read().decode("utf-8", errors="replace")
     except Exception:
         html = None
-
     if html:
-        discovered = extract_targets_from_page(html, today.year)
         changed = False
-        for iso, entry in discovered.items():
-            if entry["target"] and schedule.get(iso, {}).get("target") != entry["target"]:
-                schedule[iso] = entry
+        for d_iso, entry in extract_targets_from_page(html, today.year).items():
+            if entry["target"] and schedule.get(d_iso, {}).get("target") != entry["target"]:
+                schedule[d_iso] = entry
                 changed = True
         if changed:
             save_schedule(schedule)
 
-    entry = schedule.get(today.isoformat())
+    # Hardcoded official schedule is authoritative for the target.
+    if iso in DAILY_TARGETS_2026:
+        target = DAILY_TARGETS_2026[iso]
+        if target == 0:
+            return "rest", None, None
+        return "ok", target, schedule.get(iso, {}).get("fact")
+
+    # Outside the hardcoded table — fall back to whatever we've scraped.
+    entry = schedule.get(iso)
     if entry and entry.get("target"):
         return "ok", entry["target"], entry.get("fact")
-
-    # Not in the schedule — only claim a rest day if the page explicitly says so.
-    if html:
-        clean = html.replace("&nbsp;", " ")
-        idx = clean.find(date_label(today))
-        if idx != -1:
-            block = clean[idx:idx + 4000]
-            if re.search(r"rest day|\bREST\b", block, re.I) and not TARGET_NUM_RE.search(block):
-                return "rest", None, None
     return "unknown", None, None
 
 

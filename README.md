@@ -12,12 +12,13 @@ other teams can run their own copy.
 2. Parses each member's push-up count from the page's embedded `teamMembers`
    data (`total_steps` field — no API key needed). The team name is read from
    the page title.
-3. Resolves **today's daily target** from a cached schedule (`daily_targets.json`).
-   The site publishes the current day's target only as an image and reveals it as
-   *text* once the day is past, so the bot scrapes the `/daily-facts` page each
-   run and auto-fills the schedule from those revealed (past) days — it learns
-   each target with no input. For the current day before it's revealed, set it
-   manually (see below). Half-challenge members get a halved target automatically.
+3. Resolves **today's daily target** from the hardcoded 2026 schedule
+   (`DAILY_TARGETS_2026` in `pushup_monitor.py`, transcribed from the app and
+   verified to sum to 3,307; rest days = 0). The mental-health *fact* text is
+   still scraped from `/daily-facts` (the site only reveals it once a day is
+   past, so early-day facts may be absent). For other years / dates outside the
+   table it falls back to the scraped `daily_targets.json` cache and
+   `--set-target`. Half-challenge members get a halved target automatically.
 4. Compares against the last snapshot in `state-<team>.json`.
 5. Posts to Slack for:
    - **Any increase** — an encouraging shout-out showing progress toward today's
