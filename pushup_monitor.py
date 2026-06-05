@@ -210,11 +210,12 @@ def build_message(member: dict, prev: int, now: int,
 
     msg = f"{emoji} *{name}* just knocked out {gained} {rep_word}! {cheer} "
     if mdt:
-        # Daily target is the headline; lifetime total/percent trails it.
-        msg += f"(*{reps_today:,}/{mdt:,}* toward today's target · {now:,} total"
+        # today's reps vs daily target, then lifetime total vs overall goal
+        msg += f"(today: {reps_today:,} / {mdt:,}"
         if goal:
-            msg += f", {round(now / goal * 100)}% of {goal:,}"
-        msg += ")"
+            msg += f", total: {now:,} / {goal:,} — {round(now / goal * 100)}%)"
+        else:
+            msg += f", total: {now:,})"
     elif goal:
         msg += f"(total: {now:,} / {goal:,} — {round(now / goal * 100)}%)"
     else:
